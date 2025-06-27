@@ -792,6 +792,9 @@ class GGUFWriter:
     def add_causal_attention(self, value: bool) -> None:
         self.add_bool(Keys.Attention.CAUSAL.format(arch=self.arch), value)
 
+    def add_qk_norm(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.QK_NORM.format(arch=self.arch), value)
+
     def add_q_lora_rank(self, length: int) -> None:
         self.add_uint32(Keys.Attention.Q_LORA_RANK.format(arch=self.arch), length)
 

@@ -842,14 +842,14 @@ class TextModel(ModelBase):
     def _set_vocab_none(self) -> None:
         self.gguf_writer.add_tokenizer_model("none")
 
-    def _set_vocab_gpt2(self) -> None:
+    def _set_vocab_gpt2(self, load_merges=True) -> None:
         tokens, toktypes, tokpre = self.get_vocab_base()
         self.gguf_writer.add_tokenizer_model("gpt2")
         self.gguf_writer.add_tokenizer_pre(tokpre)
         self.gguf_writer.add_token_list(tokens)
         self.gguf_writer.add_token_types(toktypes)
 
-        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges)
         special_vocab.add_to_gguf(self.gguf_writer)
 
     def _set_vocab_qwen(self):
@@ -6394,15 +6394,14 @@ class UltravoxWhisperEncoderModel(WhisperEncoderModel):
 
 
 @ModelBase.register("HunYuanMoEV1ForCausalLM")
-class HunYuanMoEModel(LlamaModel):
+class HunYuanMoEModel(TextModel):
     model_arch = gguf.MODEL_ARCH.HUNYUAN_MOE
-    undo_permute = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
     def set_vocab(self):
-        self._set_vocab_gpt2()
+        self._set_vocab_gpt2(load_merges=False)
 
     def get_vocab_base(self) -> tuple[list[str], list[int], str]:
         tokens: list[str] = []
@@ -6411,52 +6410,41 @@ class HunYuanMoEModel(LlamaModel):
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
-        # merge logic is copied from QwenModel, maybe incorrect
         merges = []
-        vocab = {}
         mergeable_ranks = tokenizer.mergeable_ranks
         for token, rank in mergeable_ranks.items():
-            vocab[QwenModel.token_bytes_to_string(token)] = rank
             if len(token) == 1:
                 continue
+            # bpe() will decompose the token into its smallest parts and then
+            # re-merge them. If the token is a valid merge, bpe() will return
+            # the two pieces that were merged to create it.
             merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
             if len(merged) == 2:
                 merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
         self.gguf_writer.add_token_merges(merges)
 
+        vocab_size = self.hparams["vocab_size"]
+
         reverse_vocab = tokenizer.decoder
-        assert max(reverse_vocab.keys()) < tokenizer.vocab_size
+        assert max(reverse_vocab.keys()) < tokenizer.vocab_size, tokenizer.vocab_size == vocab_size
 
         tokpre = self.get_vocab_base_pre(tokenizer)
-        added_vocab = tokenizer.get_added_vocab()
+        special_token_ids = set(tokenizer.special_tokens.values())
 
-        added_tokens_decoder = tokenizer.added_tokens_decoder
+        tokens: list[str] = []
+        toktypes: list[int] = []
 
-        for i in range(tokenizer.vocab_size):
+        for i in range(vocab_size):
             if i not in reverse_vocab:
                 tokens.append(f"[PAD{i}]")
                 toktypes.append(gguf.TokenType.UNUSED)
             else:
-                token: str = reverse_vocab[i]
-                if token in added_vocab:
-                    # The tokenizer in llama.cpp assumes the CONTROL and USER_DEFINED tokens are pre-normalized.
-                    # To avoid unexpected issues - we make sure to normalize non-normalized tokens
-                    if not added_tokens_decoder[i].normalized:
-                        previous_token = token
-                        token = tokenizer.decode(tokenizer.encode(token, add_special_tokens=False))
-                        if previous_token != token:
-                            logger.info(f"{repr(previous_token)} is encoded and decoded back to {repr(token)} using AutoTokenizer")
-
-                    if added_tokens_decoder[i].special or self.does_token_look_special(token):
-                        toktypes.append(gguf.TokenType.CONTROL)
-                    else:
-                        # NOTE: this was added for Gemma.
-                        # Encoding and decoding the tokens above isn't sufficient for this case.
-                        token = token.replace(b"\xe2\x96\x81".decode("utf-8"), " ")  # pre-normalize user-defined spaces
-                        toktypes.append(gguf.TokenType.USER_DEFINED)
+                token = reverse_vocab[i]
+                tokens.append(token)
+                if i in special_token_ids:
+                    toktypes.append(gguf.TokenType.CONTROL)
                 else:
                     toktypes.append(gguf.TokenType.NORMAL)
-                tokens.append(token)
 
         return tokens, toktypes, tokpre
 
@@ -6473,6 +6461,25 @@ class HunYuanMoEModel(LlamaModel):
         moe_topk = self.hparams["moe_topk"]
         assert all(topk == moe_topk[0] for topk in moe_topk)
         self.gguf_writer.add_expert_used_count(moe_topk[0])
+
+        moe_shared_expert = self.hparams["num_shared_expert"]
+        assert all(n == moe_shared_expert[0] for n in moe_shared_expert)
+        self.gguf_writer.add_expert_shared_count(moe_shared_expert[0])
+
+        self.gguf_writer.add_qk_norm(self.hparams.get("use_qk_norm", True))
+
+        # Rope
+        rope_scaling = self.hparams.get("rope_scaling", {})
+        if rope_scaling.get("type") == "dynamic":
+            logger.warning("Model uses 'dynamic' rope scaling, which is not yet supported in GGUF. "
+                           "The resulting model may not work correctly with contexts longer than the training length.")
+            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
+        else:
+            # Fallback for other potential scaling types
+            # This part is inherited from TextModel and will handle standard rope_theta
+            pass
+
+    _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # process the experts separately
@@ -6510,6 +6517,13 @@ class HunYuanMoEModel(LlamaModel):
                 return []
 
         return [(self.map_tensor_name(name), data_torch)]
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+        if self._experts is not None:
+            experts = [k for d in self._experts for k in d.keys()]
+            if len(experts) > 0:
+                raise ValueError(f"Unprocessed experts: {experts}")
 
 ###### CONVERSION LOGIC ######
 
