@@ -14,7 +14,7 @@ import sys
 from enum import IntEnum
 from pathlib import Path
 from hashlib import sha256
-from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterable, Iterator, Literal, Sequence, TypeVar, Dict, cast
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Iterable, Iterator, Literal, Sequence, TypeVar, cast
 from itertools import chain
 from transformers import AutoConfig
 
@@ -6411,6 +6411,7 @@ class HunYuanMoEModel(LlamaModel):
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
+        # merge logic is copied from QwenModel, maybe incorrect
         merges = []
         vocab = {}
         mergeable_ranks = tokenizer.mergeable_ranks

@@ -303,7 +303,7 @@ class TensorNameMap:
             "model.layers.{bid}.block_sparse_moe.router.layer", # granitemoe
             "model.layers.{bid}.feed_forward.router",           # llama4
             "encoder.layers.{bid}.mlp.router.layer",            # nomic-bert-moe
-            "model.layers.{bid}.mlp.gate.wg.weight",            # hunyuan
+            "model.layers.{bid}.mlp.gate.wg",                   # hunyuan
         ),
 
         MODEL_TENSOR.FFN_GATE_INP_SHEXP: (
@@ -363,7 +363,7 @@ class TensorNameMap:
             "model.layers.{bid}.mlp.shared_expert.up_proj",          # qwen2moe
             "model.layers.{bid}.mlp.shared_experts.up_proj",         # deepseek deepseek2
             "model.layers.{bid}.feed_forward.shared_expert.up_proj", # llama4
-            "model.layers.{bid}.mlp.shared_mlp.up_proj.weight",      # hunyuan
+            "model.layers.{bid}.mlp.shared_mlp.up_proj",             # hunyuan
         ),
 
         # AWQ-activation gate
@@ -400,7 +400,7 @@ class TensorNameMap:
             "model.layers.{bid}.mlp.shared_expert.gate_proj",          # qwen2moe
             "model.layers.{bid}.mlp.shared_experts.gate_proj",         # deepseek deepseek2
             "model.layers.{bid}.feed_forward.shared_expert.gate_proj", # llama4
-            "model.layers.{bid}.mlp.shared_mlp.gate_proj.weight",      # hunyuan
+            "model.layers.{bid}.mlp.shared_mlp.gate_proj",             # hunyuan
         ),
 
         # Feed-forward down
@@ -450,7 +450,7 @@ class TensorNameMap:
             "model.layers.{bid}.mlp.shared_experts.down_proj",         # deepseek deepseek2
             "model.layers.{bid}.feed_forward.shared_expert.down_proj", # llama4
             "model.layers.{bid}.shared_mlp.output_linear",             # granitemoe
-            "model.layers.{bid}.mlp.shared_mlp.down_proj.weight",      # hunyuan
+            "model.layers.{bid}.mlp.shared_mlp.down_proj",             # hunyuan
         ),
 
         MODEL_TENSOR.ATTN_Q_NORM: (
