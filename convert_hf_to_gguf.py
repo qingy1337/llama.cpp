@@ -6463,6 +6463,17 @@ class HunYuanMoEModel(LlamaModel):
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
 
+        self.gguf_writer.add_expert_count(self.hparams["num_experts"])
+        self.gguf_writer.add_expert_shared_feed_forward_length(self.hparams["intermediate_size"])
+
+        moe_intermediate_size = self.hparams["moe_intermediate_size"]
+        assert all(n == moe_intermediate_size[0] for n in moe_intermediate_size)
+        self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size[0])
+
+        moe_topk = self.hparams["moe_topk"]
+        assert all(topk == moe_topk[0] for topk in moe_topk)
+        self.gguf_writer.add_expert_used_count(moe_topk[0])
+
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # process the experts separately
         if name.find("mlp.experts") != -1:
