@@ -6404,31 +6404,24 @@ class HunYuanMoEModel(LlamaModel):
     def set_vocab(self):
         self._set_vocab_gpt2()
 
-    def _load_tiktoken_bpe(tiktoken_bpe_file: str) -> Dict[bytes, int]:
-        import base64
-        dic = {}
-        rank = 0
-        for line in open(tiktoken_bpe_file, "rb"):
-            if line:
-                token, _ = line.split()
-                if base64.b64decode(token) in dic:
-                    continue
-                dic[base64.b64decode(token)] = int(rank)
-                rank += 1
-        global SPECIAL_START_ID
-        SPECIAL_START_ID=rank
-        return dic
-
     def get_vocab_base(self) -> tuple[list[str], list[int], str]:
         tokens: list[str] = []
         toktypes: list[int] = []
 
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
-        print(tokenizer)
-        print(tokenizer.tokenizer)
-        print(type(tokenizer.decoder))
-        # exit(0)
+
+        merges = []
+        vocab = {}
+        mergeable_ranks = tokenizer.mergeable_ranks
+        for token, rank in mergeable_ranks.items():
+            vocab[QwenModel.token_bytes_to_string(token)] = rank
+            if len(token) == 1:
+                continue
+            merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
+            if len(merged) == 2:
+                merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
+        self.gguf_writer.add_token_merges(merges)
 
         reverse_vocab = tokenizer.decoder
         assert max(reverse_vocab.keys()) < tokenizer.vocab_size
