@@ -1507,10 +1507,9 @@ void llama_model::load_hparams(llama_model_loader & ml) {
             } break;
         case LLM_ARCH_HUNYUAN_MOE:
             {
-                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
-
-                hparams.n_ff_exp      = hparams.n_ff(0);
-                hparams.n_ff_shexp    = hparams.n_ff_exp;
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
+                ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp);
+                ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp);
 
                 switch (hparams.n_layer) {
                     case 32: type = LLM_TYPE_A13B; break;
@@ -14377,29 +14376,25 @@ struct llm_build_hunyuan_moe : public llm_graph_context {
                         ext_factor, attn_factor, beta_fast, beta_slow
                         );
 
+                cb(Qcur, "Qcur", il);
+                cb(Kcur, "Kcur", il);
+                cb(Vcur, "Vcur", il);
+
                 Kcur = ggml_rope_ext(
                         ctx0, Kcur, inp_pos, rope_factors,
                         n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                         ext_factor, attn_factor, beta_fast, beta_slow
                         );
 
-                if (model.layers[il].attn_k_norm) {
-                    Kcur = build_norm(Kcur,
-                            model.layers[il].attn_k_norm, model.layers[il].attn_k_norm_b,
-                            LLM_NORM_RMS, il);
-                    cb(Kcur, "Kcur_norm", il);
-                }
+                Kcur = build_norm(Kcur,
+                        model.layers[il].attn_k_norm, nullptr,
+                        LLM_NORM_RMS, il);
+                cb(Kcur, "Kcur_norm", il);
 
-                if (model.layers[il].attn_q_norm) {
-                    Qcur = build_norm(Qcur,
-                            model.layers[il].attn_q_norm, model.layers[il].attn_q_norm_b,
-                            LLM_NORM_RMS, il);
-                    cb(Qcur, "Qcur_norm", il);
-                }
-
-                cb(Qcur, "Qcur", il);
-                cb(Kcur, "Kcur", il);
-                cb(Vcur, "Vcur", il);
+                Qcur = build_norm(Qcur,
+                        model.layers[il].attn_q_norm, nullptr,
+                        LLM_NORM_RMS, il);
+                cb(Qcur, "Qcur_norm", il);
 
                 cur = build_attn(inp_attn, gf,
                         model.layers[il].wo, model.layers[il].bo,
@@ -14415,42 +14410,38 @@ struct llm_build_hunyuan_moe : public llm_graph_context {
             ggml_tensor * ffn_inp = ggml_add(ctx0, cur, inpSA);
             cb(ffn_inp, "ffn_inp", il);
 
-            ffn_inp = build_norm(ffn_inp,
+            cur = build_norm(ffn_inp,
                 model.layers[il].ffn_norm, NULL,
                 LLM_NORM_RMS, il);
             cb(cur, "ffn_norm", il);
 
             // feed-forward network (non-MoE)
-            ggml_tensor * cur_mlp = nullptr;
-            {
-                cur_mlp = build_ffn(ffn_inp,
-                        model.layers[il].ffn_up_shexp,   NULL, NULL,
-                        model.layers[il].ffn_gate_shexp, NULL, NULL,
-                        model.layers[il].ffn_down_shexp, NULL, NULL,
-                        NULL,
-                        LLM_FFN_SILU, LLM_FFN_PAR, il);
-                cb(cur_mlp, "ffn_out", il);
-            }
+            ggml_tensor * cur_mlp = build_ffn(cur,
+                    model.layers[il].ffn_up_shexp,   NULL, NULL,
+                    model.layers[il].ffn_gate_shexp, NULL, NULL,
+                    model.layers[il].ffn_down_shexp, NULL, NULL,
+                    NULL,
+                    LLM_FFN_SILU, LLM_FFN_PAR, il);
+            cb(cur_mlp, "ffn_mlp", il);
 
             // MoE branch
-            ggml_tensor * cur_moe = nullptr;
-            {
-                cur_moe = build_moe_ffn(ffn_inp,
-                        model.layers[il].ffn_gate_inp,
-                        model.layers[il].ffn_up_exps,
-                        model.layers[il].ffn_gate_exps,
-                        model.layers[il].ffn_down_exps,
-                        nullptr,
-                        n_expert, n_expert_used,
-                        LLM_FFN_SILU, true,
-                        false, 0.0,
-                        LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
-                        il);
-                cb(cur_moe, "ffn_moe_out", il);
-            }
+            ggml_tensor * cur_moe = build_moe_ffn(cur,
+                    model.layers[il].ffn_gate_inp,
+                    model.layers[il].ffn_up_exps,
+                    model.layers[il].ffn_gate_exps,
+                    model.layers[il].ffn_down_exps,
+                    nullptr,
+                    n_expert, n_expert_used,
+                    LLM_FFN_SILU, false,
+                    false, 0.0,
+                    LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX,
+                    il);
+            cb(cur_moe, "ffn_moe_out", il);
 
-            cur = ggml_add(ctx0, ggml_add(ctx0, cur_moe, cur_mlp), ffn_inp);
-            cb(cur, "ffn_out", il);
+            ggml_tensor * ffn_out = ggml_add(ctx0, cur_moe, cur_mlp);
+            cb(ffn_out, "ffn_out", il);
+
+            cur = ggml_add(ctx0, ffn_out, ffn_inp);
 
             cur = build_cvec(cur, il);
             cb(cur, "l_out", il);
