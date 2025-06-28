@@ -14326,7 +14326,7 @@ struct llm_build_hunyuan_moe : public llm_graph_context {
 
         auto * inp_attn = build_attn_inp_kv_unified();
 
-        const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f/sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
+        const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
         ggml_tensor * inp_out_ids = build_inp_out_ids();
 
@@ -15001,7 +15001,6 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_BAILINGMOE:
         case LLM_ARCH_NEO_BERT:
         case LLM_ARCH_ARCEE:
-        case LLM_ARCH_HUNYUAN_MOE:
             return LLAMA_ROPE_TYPE_NORM;
 
         // the pairs of head values are offset by n_rot/2
@@ -15037,6 +15036,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_EXAONE:
         case LLM_ARCH_MINICPM3:
         case LLM_ARCH_DOTS1:
+        case LLM_ARCH_HUNYUAN_MOE:
             return LLAMA_ROPE_TYPE_NEOX;
 
         case LLM_ARCH_QWEN2VL:
