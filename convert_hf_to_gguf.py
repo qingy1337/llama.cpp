@@ -6399,25 +6399,25 @@ class HunYuanMoEModel(TextModel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # FIX for tied embeddings: Capture the token embeddings.
+        self._tok_embd = None
 
     def set_vocab(self):
         self._set_vocab_gpt2(load_merges=False)
+        # FIX for BOS token: Manually set the correct BOS token ID.
+        # The SpecialVocab helper gets incorrect id `bos_token_id: 1` from config.json.
+        self.gguf_writer.add_bos_token_id(127959) # <|bos|>
 
     def get_vocab_base(self) -> tuple[list[str], list[int], str]:
-        tokens: list[str] = []
-        toktypes: list[int] = []
-
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
+        # Fake merges
         merges = []
         mergeable_ranks = tokenizer.mergeable_ranks
         for token, rank in mergeable_ranks.items():
             if len(token) == 1:
                 continue
-            # bpe() will decompose the token into its smallest parts and then
-            # re-merge them. If the token is a valid merge, bpe() will return
-            # the two pieces that were merged to create it.
             merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
             if len(merged) == 2:
                 merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
@@ -6472,16 +6472,22 @@ class HunYuanMoEModel(TextModel):
         rope_scaling = self.hparams.get("rope_scaling", {})
         if rope_scaling.get("type") == "dynamic":
             logger.warning("Model uses 'dynamic' rope scaling, which is not yet supported in GGUF. "
-                           "The resulting model may not work correctly with contexts longer than the training length.")
+                           "Long-context extrapolation will not work correctly. Setting rope scaling type to NONE.")
             self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
-        else:
-            # Fallback for other potential scaling types
-            # This part is inherited from TextModel and will handle standard rope_theta
-            pass
 
     _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # FIX for tied embeddings: Capture the token embeddings.
+        if name == "model.embed_tokens.weight":
+            self._tok_embd = data_torch.clone()
+
+        # FIX for tied embeddings: Skip the lm_head if it's tied.
+        if name == "lm_head.weight":
+            if self.hparams.get("tie_word_embeddings", False):
+                logger.info("Skipping tied output layer 'lm_head.weight'")
+                return []
+
         # process the experts separately
         if name.find("mlp.experts") != -1:
             n_experts = self.hparams["num_experts"]
