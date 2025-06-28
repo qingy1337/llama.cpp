@@ -6399,20 +6399,22 @@ class HunYuanMoEModel(TextModel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # FIX for tied embeddings: Capture the token embeddings.
+        # For handling tied embeddings
         self._tok_embd = None
 
     def set_vocab(self):
-        self._set_vocab_gpt2(load_merges=False)
-        # FIX for BOS token: Manually set the correct BOS token ID.
-        # The SpecialVocab helper gets incorrect id `bos_token_id: 1` from config.json.
-        self.gguf_writer.add_bos_token_id(127959) # <|bos|>
-
-    def get_vocab_base(self) -> tuple[list[str], list[int], str]:
+        """
+        A self-contained vocab implementation for the HunYuan tiktoken-based tokenizer.
+        This method correctly generates tokens, types, and the required "fake" merges
+        to satisfy the llama.cpp GGUF loader.
+        """
         from transformers import AutoTokenizer
         tokenizer = AutoTokenizer.from_pretrained(self.dir_model, trust_remote_code=True)
 
-        # Fake merges
+        # 1. Get the pre-tokenizer identifier hash
+        tokpre = self.get_vocab_base_pre(tokenizer)
+
+        # 2. Reverse-engineer the merges list from mergeable_ranks
         merges = []
         mergeable_ranks = tokenizer.mergeable_ranks
         for token, rank in mergeable_ranks.items():
@@ -6421,19 +6423,13 @@ class HunYuanMoEModel(TextModel):
             merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
             if len(merged) == 2:
                 merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
-        self.gguf_writer.add_token_merges(merges)
 
+        # 3. Generate the tokens and toktypes lists
         vocab_size = self.hparams["vocab_size"]
-
         reverse_vocab = tokenizer.decoder
-        assert max(reverse_vocab.keys()) < tokenizer.vocab_size, tokenizer.vocab_size == vocab_size
-
-        tokpre = self.get_vocab_base_pre(tokenizer)
         special_token_ids = set(tokenizer.special_tokens.values())
-
         tokens: list[str] = []
         toktypes: list[int] = []
-
         for i in range(vocab_size):
             if i not in reverse_vocab:
                 tokens.append(f"[PAD{i}]")
@@ -6446,30 +6442,42 @@ class HunYuanMoEModel(TextModel):
                 else:
                     toktypes.append(gguf.TokenType.NORMAL)
 
-        return tokens, toktypes, tokpre
+        # 4. Write all vocab-related fields to the GGUF writer
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre(tokpre)
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+        self.gguf_writer.add_token_merges(merges)
+
+        # 5. Add special tokens and chat templates
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=False)
+        special_vocab.add_to_gguf(self.gguf_writer)
+        # FIX for BOS token: Manually set the correct BOS token ID.
+        self.gguf_writer.add_bos_token_id(127959) # <|bos|>
 
     def set_gguf_parameters(self):
         super().set_gguf_parameters()
+        hparams = self.hparams
 
-        self.gguf_writer.add_expert_count(self.hparams["num_experts"])
-        self.gguf_writer.add_expert_shared_feed_forward_length(self.hparams["intermediate_size"])
+        self.gguf_writer.add_expert_count(hparams["num_experts"])
+        self.gguf_writer.add_expert_shared_feed_forward_length(hparams["intermediate_size"])
 
-        moe_intermediate_size = self.hparams["moe_intermediate_size"]
+        moe_intermediate_size = hparams["moe_intermediate_size"]
         assert all(n == moe_intermediate_size[0] for n in moe_intermediate_size)
         self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size[0])
 
-        moe_topk = self.hparams["moe_topk"]
+        moe_topk = hparams["moe_topk"]
         assert all(topk == moe_topk[0] for topk in moe_topk)
         self.gguf_writer.add_expert_used_count(moe_topk[0])
 
-        moe_shared_expert = self.hparams["num_shared_expert"]
+        moe_shared_expert = hparams["num_shared_expert"]
         assert all(n == moe_shared_expert[0] for n in moe_shared_expert)
         self.gguf_writer.add_expert_shared_count(moe_shared_expert[0])
 
-        self.gguf_writer.add_qk_norm(self.hparams.get("use_qk_norm", True))
+        self.gguf_writer.add_qk_norm(hparams.get("use_qk_norm", True))
 
         # Rope
-        rope_scaling = self.hparams.get("rope_scaling", {})
+        rope_scaling = hparams.get("rope_scaling", {})
         if rope_scaling.get("type") == "dynamic":
             self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
             self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
@@ -6478,50 +6486,33 @@ class HunYuanMoEModel(TextModel):
     _experts: list[dict[str, Tensor]] | None = None
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # FIX for tied embeddings: Capture the token embeddings.
         if name == "model.embed_tokens.weight":
             self._tok_embd = data_torch.clone()
-
-        # FIX for tied embeddings: Skip the lm_head if it's tied.
         if name == "lm_head.weight":
             if self.hparams.get("tie_word_embeddings", False):
                 logger.info("Skipping tied output layer 'lm_head.weight'")
                 return []
-
-        # process the experts separately
         if name.find("mlp.experts") != -1:
             n_experts = self.hparams["num_experts"]
             assert bid is not None
-
-            tensors: list[tuple[str, Tensor]] = []
-
             if self._experts is None:
                 self._experts = [{} for _ in range(self.block_count)]
-
             self._experts[bid][name] = data_torch
-
             if len(self._experts[bid]) >= n_experts * 3:
-                # merge the experts into a single 3d tensor
+                tensors: list[tuple[str, Tensor]] = []
                 for w_name in ["down_proj", "gate_proj", "up_proj"]:
                     datas: list[Tensor] = []
-
                     for xid in range(n_experts):
                         ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
                         datas.append(self._experts[bid][ename])
                         del self._experts[bid][ename]
-
                     data_torch = torch.stack(datas, dim=0)
-
                     merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-
                     new_name = self.map_tensor_name(merged_name)
-
                     tensors.append((new_name, data_torch))
-
                 return tensors
             else:
                 return []
-
         return [(self.map_tensor_name(name), data_torch)]
 
     def prepare_tensors(self):
