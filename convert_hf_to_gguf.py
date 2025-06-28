@@ -6471,9 +6471,9 @@ class HunYuanMoEModel(TextModel):
         # Rope
         rope_scaling = self.hparams.get("rope_scaling", {})
         if rope_scaling.get("type") == "dynamic":
-            logger.warning("Model uses 'dynamic' rope scaling, which is not yet supported in GGUF. "
-                           "Long-context extrapolation will not work correctly. Setting rope scaling type to NONE.")
-            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.NONE)
+            self.gguf_writer.add_rope_scaling_type(gguf.RopeScalingType.YARN)
+            self.gguf_writer.add_rope_scaling_factor(rope_scaling["factor"])
+            self.gguf_writer.add_rope_scaling_orig_ctx_len(self.hparams["max_position_embeddings"])
 
     _experts: list[dict[str, Tensor]] | None = None
 
