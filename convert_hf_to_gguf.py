@@ -6416,18 +6416,21 @@ class HunYuanMoEModel(TextModel):
 
         # 2. Reverse-engineer the merges list from mergeable_ranks
         merges = []
+        vocab = {}
         mergeable_ranks = tokenizer.mergeable_ranks
         for token, rank in mergeable_ranks.items():
+            #vocab[QwenModel.token_bytes_to_string(token)] = rank
             if len(token) == 1:
                 continue
             merged = QwenModel.bpe(mergeable_ranks, token, max_rank=rank)
-            if len(merged) == 2:
+            if len(merged) == 2: #todo this is an assert in Qwen, why?
                 merges.append(' '.join(map(QwenModel.token_bytes_to_string, merged)))
 
         # 3. Generate the tokens and toktypes lists
         vocab_size = self.hparams["vocab_size"]
-        reverse_vocab = tokenizer.decoder
         special_token_ids = set(tokenizer.special_tokens.values())
+        reverse_vocab = tokenizer.decoder
+        #reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_token_ids}.items()}
         tokens: list[str] = []
         toktypes: list[int] = []
         for i in range(vocab_size):
