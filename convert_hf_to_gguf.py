@@ -6425,6 +6425,7 @@ class HunYuanMoEModel(TextModel):
 
         # 3. Generate the tokens and toktypes lists
         vocab_size = self.hparams["vocab_size"]
+        assert tokenizer.vocab_size == vocab_size
         special_tokens = tokenizer.special_tokens
         reverse_vocab = {id_ : encoded_tok for encoded_tok, id_ in {**vocab, **special_tokens}.items()}
         tokens: list[str] = []
