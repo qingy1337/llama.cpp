@@ -6395,7 +6395,11 @@ class UltravoxWhisperEncoderModel(WhisperEncoderModel):
         self.gguf_writer.add_audio_stack_factor(self.global_config["stack_factor"])
 
 
-@ModelBase.register("HunYuanMoEV1ForCausalLM")
+@ModelBase.register(
+    "HunYuanMoEV1ForCausalLM",
+    # some variants of the architecture omit the version in the name
+    "HunYuanMoEForCausalLM",
+)
 class HunYuanMoEModel(TextModel):
     model_arch = gguf.MODEL_ARCH.HUNYUAN_MOE
 
