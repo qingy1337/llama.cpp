@@ -1514,7 +1514,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 // TODO: read from gguf
                 float n_dim = hparams.n_embd_head_k;
                 float alpha = 1000.0f; // NTK-Aware
-                hparams.rope_freq_base_train = 10000.0f * std::powf(alpha, n_dim / (n_dim - 2.0f));
+                hparams.rope_freq_base_train = 10000.0f * std::pow(alpha, n_dim / (n_dim - 2.0f));
 
                 switch (hparams.n_layer) {
                     case 32: type = LLM_TYPE_A13B; break;

@@ -12,6 +12,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 void llm_graph_input_embd::set_input(const llama_ubatch * ubatch) {
     if (ubatch->token) {
@@ -645,6 +647,119 @@ ggml_tensor * llm_graph_context::build_ffn(
     return cur;
 }
 
+// simplified router that supports capacity-aware top-k expert selection
+struct router_topk_params {
+    int top_k;
+};
+
+static void router_topk_cap_indices(struct ggml_tensor * dst, int /*ith*/, int /*nth*/, void * userdata) {
+    const router_topk_params * params = (const router_topk_params *) userdata;
+
+    const ggml_tensor * scores = dst->src[0]; // [n_expert, n_tokens] - selection scores
+    const ggml_tensor * probs  = dst->src[1]; // [n_expert, n_tokens] - router probs
+
+    const int n_expert = scores->ne[0];
+    const int n_tokens = scores->ne[1];
+    const int top_k    = params->top_k;
+    const int cap      = std::max(top_k, top_k * n_tokens / n_expert);
+
+    const int stride_s = scores->nb[1] / sizeof(float);
+    const int stride_p = probs->nb[1]  / sizeof(float);
+
+    std::vector<int> counts(n_expert, 0);
+    std::vector<int> order(n_expert);
+
+    auto * out = (int32_t *) dst->data; // [top_k, n_tokens]
+
+    for (int t = 0; t < n_tokens; ++t) {
+        const float * row_s = (const float *) scores->data + t * stride_s;
+        const float * row_p = (const float *) probs->data  + t * stride_p;
+
+        for (int i = 0; i < n_expert; ++i) order[i] = i;
+        std::partial_sort(order.begin(), order.begin() + top_k, order.end(),
+                [&](int a, int b) { return row_s[a] > row_s[b]; });
+
+        float sum_prob = 0.0f;
+        for (int r = 0; r < top_k; ++r) sum_prob += row_p[order[r]];
+        if (sum_prob == 0.0f) sum_prob = 1e-9f;
+
+        for (int r = 0; r < top_k; ++r) {
+            const int e = order[r];
+            out[r + t * top_k] = e;
+            if (counts[e] < cap) {
+                counts[e]++;
+            }
+        }
+    }
+}
+
+static void router_topk_cap_weights(struct ggml_tensor * dst, int /*ith*/, int /*nth*/, void * userdata) {
+    const router_topk_params * params = (const router_topk_params *) userdata;
+
+    const ggml_tensor * scores = dst->src[0]; // [n_expert, n_tokens]
+    const ggml_tensor * probs  = dst->src[1]; // [n_expert, n_tokens]
+
+    const int n_expert = scores->ne[0];
+    const int n_tokens = scores->ne[1];
+    const int top_k    = params->top_k;
+    const int cap      = std::max(top_k, top_k * n_tokens / n_expert);
+
+    const int stride_s = scores->nb[1] / sizeof(float);
+    const int stride_p = probs->nb[1]  / sizeof(float);
+
+    std::vector<int> counts(n_expert, 0);
+    std::vector<int> order(n_expert);
+
+    auto * out = (float *) dst->data; // [1, top_k, n_tokens]
+
+    for (int t = 0; t < n_tokens; ++t) {
+        const float * row_s = (const float *) scores->data + t * stride_s;
+        const float * row_p = (const float *) probs->data  + t * stride_p;
+
+        for (int i = 0; i < n_expert; ++i) order[i] = i;
+        std::partial_sort(order.begin(), order.begin() + top_k, order.end(),
+                [&](int a, int b) { return row_s[a] > row_s[b]; });
+
+        float sum_prob = 0.0f;
+        for (int r = 0; r < top_k; ++r) sum_prob += row_p[order[r]];
+        if (sum_prob == 0.0f) sum_prob = 1e-9f;
+
+        for (int r = 0; r < top_k; ++r) {
+            const int e = order[r];
+            const int idx = r + t * top_k;
+            if (counts[e] < cap) {
+                out[idx] = row_p[e] / sum_prob;
+                counts[e]++;
+            } else {
+                out[idx] = 0.0f;
+            }
+        }
+    }
+}
+
+static ggml_tensor * router_topk_capacity(
+        struct ggml_context * ctx,
+        ggml_tensor         * scores,
+        ggml_tensor         * probs,
+        int                   top_k,
+        ggml_tensor        ** out_weights) {
+
+    router_topk_params * params = new router_topk_params{ top_k };
+
+    ggml_tensor * args[2] = { scores, probs };
+    ggml_tensor * selected = ggml_custom_4d(ctx, GGML_TYPE_I32,
+            top_k, scores->ne[1], 1, 1,
+            args, 2, router_topk_cap_indices, 1, params);
+
+    if (out_weights) {
+        *out_weights = ggml_custom_4d(ctx, GGML_TYPE_F32,
+                1, top_k, scores->ne[1], 1,
+                args, 2, router_topk_cap_weights, 1, params);
+    }
+
+    return selected;
+}
+
 ggml_tensor * llm_graph_context::build_moe_ffn(
          ggml_tensor * cur,
          ggml_tensor * gate_inp,
@@ -696,13 +811,20 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
         selection_probs = logits;
     }
 
-    // select experts
-    ggml_tensor * selected_experts = ggml_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+    ggml_tensor * weights = nullptr;
+    ggml_tensor * selected_experts = nullptr;
+
+    if (arch == LLM_ARCH_HUNYUAN_MOE) {
+        // select experts using capacity-aware top-k router
+        selected_experts = router_topk_capacity(ctx0, selection_probs, probs, n_expert_used, &weights);
+    } else {
+        // standard top-k routing
+        selected_experts = ggml_top_k(ctx0, selection_probs, n_expert_used); // [n_expert_used, n_tokens]
+        weights = ggml_get_rows(ctx0,
+                ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); // [1, n_expert_used, n_tokens]
+    }
     cb(selected_experts->src[0], "ffn_moe_argsort", il);
     cb(selected_experts, "ffn_moe_topk", il);
-
-    ggml_tensor * weights = ggml_get_rows(ctx0,
-            ggml_reshape_3d(ctx0, probs, 1, n_expert, n_tokens), selected_experts); // [1, n_expert_used, n_tokens]
     cb(weights, "ffn_moe_weights", il);
 
     if (norm_w) {
